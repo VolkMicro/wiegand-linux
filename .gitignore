@@ -12,3 +12,7 @@
 *.lai
 *.la
 *.a
+
+# Cmake helpers
+CMakeLists.txt
+cmake-build-debug

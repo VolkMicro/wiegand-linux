@@ -6,18 +6,68 @@
 # UDP on port 9999
 #
 #
-lastReadNum=" "
+WIEGAND_GPIO_D0=111
+WIEGAND_GPIO_D1=109
+WIEGAND_LAST_READ_NUMBER=" "
+WIEGAND_DEV="/sys/kernel/wiegand/read"
 
-while [ 1 ]; do
-  IN=`cat "/sys/kernel/wiegand/read"`
+WIEGAND_NEED_LOAD_MODULE=0
+
+function unload_module() {
+  echo "Unloading module wiegand-gpio..."
+  modprobe -r wiegand-gpio
+  mosquitto_pub -t /devices/wiegand/controls/Reader/meta/error -m r -r
+}
+
+# Check module properly loaded
+if lsmod | grep -q wiegand_gpio; then
+  echo "Module wiegand-gpio loaded already. Checking module params..."
+
+  D0_GPIO=$(cat /sys/module/wiegand_gpio/parameters/D0)
+  D1_GPIO=$(cat /sys/module/wiegand_gpio/parameters/D1)
+
+  if [ $WIEGAND_GPIO_D0 != "$D0_GPIO" ] || [ $WIEGAND_GPIO_D1 != "$D1_GPIO" ]; then
+    echo "Module need reload with new parameters"
+    WIEGAND_NEED_LOAD_MODULE=1
+    unload_module
+  fi
+else
+  WIEGAND_NEED_LOAD_MODULE=1
+fi
+
+if [ $WIEGAND_NEED_LOAD_MODULE == 1 ]; then
+  echo "Loading wiegand-gpio module..."
+  insmod ./wiegand-gpio.ko D0=${WIEGAND_GPIO_D0} D1=${WIEGAND_GPIO_D1}
+fi
+
+# Create topics for virtual device
+mosquitto_pub -t /devices/wiegand/meta/name -m Wiegand -r
+mosquitto_pub -t /devices/wiegand/meta/driver -m wb-mqtt-wiegand -r
+mosquitto_pub -t /devices/wiegand/controls/Reader/meta/type -m text -r
+mosquitto_pub -t /devices/wiegand/controls/Reader/meta/order -m 1 -r
+mosquitto_pub -t /devices/wiegand/controls/Reader/meta/readonly -m 1 -r
+mosquitto_pub -t /devices/wiegand/controls/Reader/meta/error -m '' -r
+
+
+function exit() {
+  unload_module
+}
+
+trap exit EXIT
+
+while true; do
+
+  IN=$(cat ${WIEGAND_DEV})
   set -- "$IN"
   IFS=":"; declare -a Array=($*)
 
-  if [ $lastReadNum != "${Array[0]}" ]
+  if [ "$WIEGAND_LAST_READ_NUMBER" != "${Array[0]}" ]
   then
-    lastReadNum="${Array[0]}"
-    echo "${Array[0]} Facility: ${Array[1]} Card: ${Array[2]}"
-    #echo "${Array[0]} Facility: ${Array[1]} Card: ${Array[2]}" | nc -b -q 1 -u 192.168.1.255 9999
+    WIEGAND_LAST_READ_NUMBER="${Array[0]}"
+    echo "${Array[0]} Data: ${Array[1]}"
+    mosquitto_pub -t /devices/wiegand/controls/Reader -m "${Array[0]}:${Array[1]}" -r
   fi
-  sleep 1;
+
+  inotifywait -e modify ${WIEGAND_DEV} &> /dev/null
 done
+
