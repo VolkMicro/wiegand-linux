@@ -34,8 +34,8 @@ module_param_named(D1, GPIO_WIEGAND_D1, ushort, S_IRUGO);
 MODULE_PARM_DESC(D1, "D1 GPIO number");
 
 
-#define MAX_WIEGAND_BYTES 6
-#define MIN_PULSE_INTERVAL_USEC 700
+#define MAX_WIEGAND_BYTES 16
+#define MIN_PULSE_INTERVAL_USEC 200
 
 
 static struct wiegand {
@@ -120,7 +120,7 @@ void wiegand_timer(unsigned long data) {
     struct wiegand *w = (struct wiegand *) data;
     int numBytes = ((w->currentBit -1) / 8 )+ 1;
 
-    if(w->currentBit == 24 || w->currentBit == 26 || w->currentBit == 32 || w->currentBit == 34 || w->currentBit == 8 || w->currentBit == 4) {
+    if(w->currentBit % 4 == 0 && numBytes <= MAX_WIEGAND_BYTES) {
         for(i=0; i< numBytes; ++i){
             w->lastBuffer[i] = w->buffer[i];
         }
@@ -129,9 +129,9 @@ void wiegand_timer(unsigned long data) {
         w->readNum++;
 
         print_wiegand_data(buf, w->buffer, w->numBits);
-        printk("wiegand-gpio: new read available [%d]: %s\n",  w->numBits, buf);
-
         sysfs_notify(wiegandKObj, NULL, "read");
+    } else {
+        printk("wiegand-gpio: unexpected package len [%d]\n", w->currentBit);
     }
 
     //reset for next reading

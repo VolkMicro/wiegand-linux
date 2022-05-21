@@ -1,4 +1,4 @@
-KERNEL_DIR=/usr/src/linux-headers-4.9.22-wb6
+KERNEL_DIR=/usr/src/linux-headers-4.9.22-wb2
 
 obj-m := wiegand-gpio.o
 PWD := $(shell pwd)
