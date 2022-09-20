@@ -19,6 +19,7 @@
 
 #include <asm/irq.h>
 #include <linux/gpio.h>
+#include <linux/ktime.h>
 
 static ushort GPIO_WIEGAND_D0 = 0;
 static ushort GPIO_WIEGAND_D1 = 0;
@@ -114,10 +115,10 @@ void wiegand_init(struct wiegand *w) {
     wiegand_clear(w);
 }
 
-void wiegand_timer(unsigned long data) {
+void wiegand_timer(struct timer_list* timer) {
     char buf[MAX_WIEGAND_BYTES * 8];
     size_t i;
-    struct wiegand *w = (struct wiegand *) data;
+    struct wiegand *w = &wiegand;
     int numBytes = ((w->currentBit -1) / 8 )+ 1;
 
     if(w->currentBit % 4 == 0 && numBytes <= MAX_WIEGAND_BYTES) {
@@ -204,9 +205,7 @@ int init_module() {
     }
 
     //setup the timer
-    init_timer(&timer);
-    timer.function = wiegand_timer;
-    timer.data = (unsigned long) &wiegand;
+    timer_setup(&timer, wiegand_timer, 0);
 
     printk("wiegand-gpio: ready\n");
     return retval;
@@ -214,12 +213,12 @@ int init_module() {
 
 irqreturn_t wiegand_data_isr(int irq, void *dev_id) {
     struct wiegand *w = (struct wiegand *)dev_id;
-    struct timespec ts, interval;
-    static struct timespec lastts;
+    struct timespec64 ts, interval;
+    static struct timespec64 lastts;
     int value = (irq == irq_d1) ? 0x80 : 0;
 
-    getnstimeofday(&ts);
-    interval = timespec_sub(ts,lastts);
+    ktime_get_ts64(&ts);
+    interval = timespec64_sub(ts,lastts);
     lastts = ts;
 
     if((interval.tv_sec == 0 ) && (interval.tv_nsec < MIN_PULSE_INTERVAL_USEC * 1000)) {
