@@ -4,7 +4,7 @@ obj-m := wiegand-gpio.o
 PWD := $(shell pwd)
 
 all: wiegand-gpio.c
-	$(MAKE) ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -C $(KERNEL_DIR) SUBDIRS=$(PWD) modules
+	$(MAKE) ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -C $(KERNEL_DIR) M=$(PWD) modules
 
 clean:
 	make -C $(KERNEL_DIR) SUBDIRS=$(PWD) clean

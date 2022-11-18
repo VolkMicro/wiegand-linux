@@ -10,7 +10,7 @@
 #include <linux/kobject.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
-#include <linux/timer.h>
+#include <linux/hrtimer.h>
 
 #include <linux/tty.h>      /* console_print() interface */
 #include <linux/signal.h>
@@ -35,7 +35,7 @@ MODULE_PARM_DESC(D1, "D1 GPIO number");
 
 
 #define MAX_WIEGAND_BYTES 16
-#define MIN_PULSE_INTERVAL_USEC 200
+#define MIN_PULSE_INTERVAL_USEC 100
 
 
 static struct wiegand {
@@ -45,10 +45,12 @@ static struct wiegand {
     int readNum;
     char lastBuffer[MAX_WIEGAND_BYTES];
     int numBits;
+    unsigned long long lastts;
 } wiegand;
 
 
-static struct timer_list timer;
+static struct hrtimer timer;
+unsigned long long lastts;
 
 static int printbinary(char *buf, unsigned long x, int nbits) {
 	unsigned long mask = 1UL << (nbits - 1);
@@ -114,28 +116,43 @@ void wiegand_init(struct wiegand *w) {
     wiegand_clear(w);
 }
 
-void wiegand_timer(unsigned long data) {
+
+static enum hrtimer_restart wiegand_timer(struct hrtimer *ltimer)
+{
     char buf[MAX_WIEGAND_BYTES * 8];
     size_t i;
-    struct wiegand *w = (struct wiegand *) data;
+    struct wiegand *w = &wiegand;
     int numBytes = ((w->currentBit -1) / 8 )+ 1;
 
-    if(w->currentBit % 4 == 0 && numBytes <= MAX_WIEGAND_BYTES) {
-        for(i=0; i< numBytes; ++i){
-            w->lastBuffer[i] = w->buffer[i];
+    unsigned long long ts, interval;
+    ts = ktime_get_ns();
+    interval = ts-wiegand.lastts;
+    if ((interval > 50*1000*1000) && (w->currentBit != 0)) {
+        if(w->currentBit % 4 == 0 && numBytes <= MAX_WIEGAND_BYTES) {
+            for(i=0; i< numBytes; ++i){
+                w->lastBuffer[i] = w->buffer[i];
+            }
+
+            w->numBits = w->currentBit;
+            w->readNum++;
+
+            print_wiegand_data(buf, w->buffer, w->numBits);
+            // sysfs_notify(wiegandKObj, NULL, "read"); // not permitted to call in atomic context
+        } else {
+            printk("wiegand-gpio: unexpected package len [%d]\n", w->currentBit);
         }
 
-        w->numBits = w->currentBit;
-        w->readNum++;
-
-        print_wiegand_data(buf, w->buffer, w->numBits);
-        sysfs_notify(wiegandKObj, NULL, "read");
-    } else {
-        printk("wiegand-gpio: unexpected package len [%d]\n", w->currentBit);
+        //reset for next reading
+        wiegand_clear(w);
     }
 
-    //reset for next reading
-    wiegand_clear(w);
+
+	u64 missed = hrtimer_forward_now(&timer,
+				     ktime_set(0,  10 * 1000000));
+	if (missed > 1)
+		printk(KERN_ERR "Missed ticks %llu\n", missed - 1);
+
+    return HRTIMER_RESTART;
 }
 
 static int irq_d0, irq_d1;
@@ -179,6 +196,14 @@ int init_module() {
 		return irq_d1;
 	}
 
+    //setup the timer
+    hrtimer_init(&timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+    timer.function = wiegand_timer;
+    hrtimer_start(&timer,
+            ktime_set(0, 10 * 1000000),
+            HRTIMER_MODE_REL);
+
+
 	/** Request IRQ for pin */
     if(request_any_context_irq(irq_d0, wiegand_data_isr, IRQF_SHARED | IRQF_TRIGGER_FALLING, "wiegand-data", &wiegand)) {
         printk(KERN_DEBUG"wiegand-gpio: Can't register IRQ %d\n", irq_d0);
@@ -203,10 +228,6 @@ int init_module() {
         kobject_put(wiegandKObj);
     }
 
-    //setup the timer
-    init_timer(&timer);
-    timer.function = wiegand_timer;
-    timer.data = (unsigned long) &wiegand;
 
     printk("wiegand-gpio: ready\n");
     return retval;
@@ -214,37 +235,30 @@ int init_module() {
 
 irqreturn_t wiegand_data_isr(int irq, void *dev_id) {
     struct wiegand *w = (struct wiegand *)dev_id;
-    struct timespec ts, interval;
-    static struct timespec lastts;
+    static unsigned long long ts, interval;
     int value = (irq == irq_d1) ? 0x80 : 0;
 
-    getnstimeofday(&ts);
-    interval = timespec_sub(ts,lastts);
+    ts = ktime_get_ns();
+    interval = ts-lastts;
     lastts = ts;
 
-    if((interval.tv_sec == 0 ) && (interval.tv_nsec < MIN_PULSE_INTERVAL_USEC * 1000)) {
+    if(  (interval)  < MIN_PULSE_INTERVAL_USEC * 1000) {
         return IRQ_HANDLED;
     }
-
-    del_timer(&timer);
 
     if(w->currentBit <=  MAX_WIEGAND_BYTES * 8) {
         w->buffer[(w->currentBit) / 8] |= (value >> ((w->currentBit) % 8));
     }
 
     w->currentBit++;
-
-    //if we don't get another interrupt for 50ms we
-    //assume the data is complete.
-    timer.expires = jiffies + msecs_to_jiffies(50);
-    add_timer(&timer);
+    w->lastts = ts;
 
     return IRQ_HANDLED;
 }
 
 void cleanup_module() {
     kobject_put(wiegandKObj);
-    del_timer(&timer);
+    hrtimer_cancel(&timer);
 
     free_irq(irq_d0, &wiegand);
     free_irq(irq_d1, &wiegand);

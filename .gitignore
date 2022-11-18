@@ -2,7 +2,7 @@
 *.slo
 *.lo
 *.o
-*.ko 
+*.ko
 *.symvers
 *.order
 # Compiled Dynamic libraries
@@ -16,3 +16,8 @@
 # Cmake helpers
 CMakeLists.txt
 cmake-build-debug
+
+*.mod
+*.mod.c
+*.cmd
+*.d
