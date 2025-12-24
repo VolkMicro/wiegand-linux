@@ -1,5 +1,5 @@
 #include <errno.h>
-#include <fcntl.h>
+#include <gpiod.h>
 #include <mosquitto.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -7,18 +7,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/inotify.h>
-#include <sys/poll.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <sys/epoll.h>
+#include <time.h>
 #include <unistd.h>
 
-#define SYSFS_PATH "/sys/kernel/wiegand/read"
 #define DEFAULT_DEVICE_ID "wiegand"
-#define DEFAULT_D0 228
-#define DEFAULT_D1 233
+#define DEFAULT_D0 228 /* A2 IN on WB8 */
+#define DEFAULT_D1 233 /* A1 IN on WB8 */
 #define DEFAULT_MQTT_HOST "localhost"
 #define DEFAULT_MQTT_PORT 1883
+#define DEFAULT_CHIP "gpiochip0"
+
+#define MIN_PULSE_NS 100000          /* 100 usec debounce */
+#define FRAME_TIMEOUT_NS (50ULL * 1000 * 1000) /* 50 msec */
 
 static volatile bool running = true;
 
@@ -29,14 +30,7 @@ struct config {
 	char mqtt_host[128];
 	int mqtt_port;
 	char config_path[256];
-	bool autoload_module;
 	bool skip_meta;
-};
-
-struct wiegand_frame {
-	char bits[256];
-	size_t len;
-	uint64_t counter;
 };
 
 static void handle_signal(int sig)
@@ -117,59 +111,11 @@ static int load_config(struct config *cfg, const char *path)
 			strncpy(cfg->mqtt_host, val, sizeof(cfg->mqtt_host) - 1);
 		else if (strcmp(key, "MQTT_PORT") == 0)
 			cfg->mqtt_port = atoi(val);
-		else if (strcmp(key, "AUTOLOAD_MODULE") == 0)
-			cfg->autoload_module = (strcmp(val, "0") != 0);
 		else if (strcmp(key, "SKIP_META") == 0)
 			cfg->skip_meta = (strcmp(val, "0") != 0);
 	}
 
 	fclose(f);
-	return 0;
-}
-
-static int ensure_module_loaded(const struct config *cfg)
-{
-	char cmd[256];
-	int ret;
-
-	if (!cfg->autoload_module)
-		return 0;
-
-	snprintf(cmd, sizeof(cmd),
-		 "modprobe -q wiegand-gpio D0=%d D1=%d", cfg->d0, cfg->d1);
-	ret = system(cmd);
-	return ret;
-}
-
-static int read_frame(struct wiegand_frame *out)
-{
-	char buf[512];
-	ssize_t n;
-	int fd;
-	char *colon;
-
-	fd = open(SYSFS_PATH, O_RDONLY);
-	if (fd < 0)
-		return -errno;
-
-	n = read(fd, buf, sizeof(buf) - 1);
-	close(fd);
-	if (n <= 0)
-		return -EIO;
-
-	buf[n] = '\0';
-	trim_newline(buf);
-
-	colon = strchr(buf, ':');
-	if (!colon)
-		return -EINVAL;
-
-	*colon = '\0';
-	out->counter = strtoull(buf, NULL, 10);
-	strncpy(out->bits, colon + 1, sizeof(out->bits) - 1);
-	out->bits[sizeof(out->bits) - 1] = '\0';
-	out->len = strlen(out->bits);
-
 	return 0;
 }
 
@@ -186,7 +132,7 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	snprintf(topic, sizeof(topic), "/devices/%s/meta/name", dev);
 	publish(mosq, topic, "Wiegand");
 	snprintf(topic, sizeof(topic), "/devices/%s/meta/driver", dev);
-	publish(mosq, topic, "wb-mqtt-wiegand");
+	publish(mosq, topic, "wb-wiegand-gpiod");
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/ReadCounter/meta/type", dev);
 	publish(mosq, topic, "value");
@@ -194,9 +140,9 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	publish(mosq, topic, "text");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Len/meta/type", dev);
 	publish(mosq, topic, "value");
-	snprintf(topic, sizeof(topic), "/devices/%s/controls/FacilityCode/meta/type", dev);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Facility/meta/type", dev);
 	publish(mosq, topic, "value");
-	snprintf(topic, sizeof(topic), "/devices/%s/controls/CardNumber/meta/type", dev);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Card/meta/type", dev);
 	publish(mosq, topic, "value");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/LastError/meta/type", dev);
 	publish(mosq, topic, "text");
@@ -207,16 +153,16 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	publish(mosq, topic, "1");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Len/meta/readonly", dev);
 	publish(mosq, topic, "1");
-	snprintf(topic, sizeof(topic), "/devices/%s/controls/FacilityCode/meta/readonly", dev);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Facility/meta/readonly", dev);
 	publish(mosq, topic, "1");
-	snprintf(topic, sizeof(topic), "/devices/%s/controls/CardNumber/meta/readonly", dev);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Card/meta/readonly", dev);
 	publish(mosq, topic, "1");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/LastError/meta/readonly", dev);
 	publish(mosq, topic, "1");
 }
 
 static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
-			  const struct wiegand_frame *frame)
+			  const char *bits, size_t len, uint64_t counter)
 {
 	char topic[128];
 	char payload[256];
@@ -224,11 +170,11 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	int facility = -1, card = -1;
 	bool parity_ok = false;
 
-	if (frame->len == 26) {
-		parity_ok = check_parity26(frame->bits);
+	if (len == 26) {
+		parity_ok = check_parity26(bits);
 		if (parity_ok) {
-			facility = bits_to_uint(frame->bits, 1, 8);
-			card = bits_to_uint(frame->bits, 9, 16);
+			facility = bits_to_uint(bits, 1, 8);
+			card = bits_to_uint(bits, 9, 16);
 		} else {
 			error = "parity_fail";
 		}
@@ -237,21 +183,21 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	}
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/ReadCounter", cfg->device_id);
-	snprintf(payload, sizeof(payload), "%llu", (unsigned long long)frame->counter);
+	snprintf(payload, sizeof(payload), "%llu", (unsigned long long)counter);
 	publish(mosq, topic, payload);
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Bits", cfg->device_id);
-	publish(mosq, topic, frame->bits);
+	publish(mosq, topic, bits);
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Len", cfg->device_id);
-	snprintf(payload, sizeof(payload), "%zu", frame->len);
+	snprintf(payload, sizeof(payload), "%zu", len);
 	publish(mosq, topic, payload);
 
-	snprintf(topic, sizeof(topic), "/devices/%s/controls/FacilityCode", cfg->device_id);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Facility", cfg->device_id);
 	snprintf(payload, sizeof(payload), "%d", facility);
 	publish(mosq, topic, payload);
 
-	snprintf(topic, sizeof(topic), "/devices/%s/controls/CardNumber", cfg->device_id);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Card", cfg->device_id);
 	snprintf(payload, sizeof(payload), "%d", card);
 	publish(mosq, topic, payload);
 
@@ -259,11 +205,16 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	publish(mosq, topic, error);
 }
 
+static inline long diff_ns(struct timespec a, struct timespec b)
+{
+	return (a.tv_sec - b.tv_sec) * 1000000000LL + (a.tv_nsec - b.tv_nsec);
+}
+
 static void print_usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage: %s [--d0 N] [--d1 N] [--device ID] [--mqtt-host HOST] [--mqtt-port PORT]\n"
-		"          [--config /etc/wb-wiegand.conf] [--no-modprobe] [--skip-meta]\n",
+		"          [--config /etc/wb-wiegand.conf] [--skip-meta]\n",
 		prog);
 }
 
@@ -277,13 +228,17 @@ int main(int argc, char **argv)
 		.mqtt_host = DEFAULT_MQTT_HOST,
 		.mqtt_port = DEFAULT_MQTT_PORT,
 		.config_path = "/etc/wb-wiegand.conf",
-		.autoload_module = true,
 		.skip_meta = false,
 	};
 	int i, ret = 1;
-	int in_fd = -1;
-	int wd;
-	struct pollfd fds[1];
+	struct gpiod_chip *chip = NULL;
+	struct gpiod_line *line_d0 = NULL, *line_d1 = NULL;
+	int epfd = -1;
+	struct epoll_event ev = {0}, events[2];
+	char bits[256] = {0};
+	int nbits = 0;
+	uint64_t counter = 0;
+	struct timespec last = {0};
 
 	for (i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "--d0") == 0 && i + 1 < argc) {
@@ -298,8 +253,6 @@ int main(int argc, char **argv)
 			cfg.mqtt_port = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
 			strncpy(cfg.config_path, argv[++i], sizeof(cfg.config_path) - 1);
-		} else if (strcmp(argv[i], "--no-modprobe") == 0) {
-			cfg.autoload_module = false;
 		} else if (strcmp(argv[i], "--skip-meta") == 0) {
 			cfg.skip_meta = true;
 		} else {
@@ -310,16 +263,6 @@ int main(int argc, char **argv)
 
 	if (access(cfg.config_path, R_OK) == 0)
 		load_config(&cfg, cfg.config_path);
-
-	if (ensure_module_loaded(&cfg) != 0) {
-		fprintf(stderr, "Failed to modprobe wiegand-gpio\n");
-		return 1;
-	}
-
-	if (access(SYSFS_PATH, R_OK) != 0) {
-		fprintf(stderr, "Sysfs path %s not available\n", SYSFS_PATH);
-		return 1;
-	}
 
 	signal(SIGINT, handle_signal);
 	signal(SIGTERM, handle_signal);
@@ -340,50 +283,81 @@ int main(int argc, char **argv)
 	if (!cfg.skip_meta)
 		publish_meta(mosq, cfg.device_id);
 
-	in_fd = inotify_init1(IN_NONBLOCK);
-	if (in_fd < 0) {
-		perror("inotify_init1");
+	chip = gpiod_chip_open_by_name(DEFAULT_CHIP);
+	if (!chip) {
+		perror("gpiod_chip_open_by_name");
+		goto out;
+	}
+	line_d0 = gpiod_chip_get_line(chip, cfg.d0);
+	line_d1 = gpiod_chip_get_line(chip, cfg.d1);
+	if (!line_d0 || !line_d1) {
+		fprintf(stderr, "failed to get lines D0/D1\n");
+		goto out;
+	}
+	if (gpiod_line_request_falling_edge_events(line_d0, "wiegand") ||
+	    gpiod_line_request_falling_edge_events(line_d1, "wiegand")) {
+		perror("gpiod_line_request");
 		goto out;
 	}
 
-	wd = inotify_add_watch(in_fd, SYSFS_PATH, IN_MODIFY);
-	if (wd < 0) {
-		perror("inotify_add_watch");
+	epfd = epoll_create1(0);
+	if (epfd < 0) {
+		perror("epoll_create1");
 		goto out;
 	}
-
-	fds[0].fd = in_fd;
-	fds[0].events = POLLIN;
+	ev.events = EPOLLIN;
+	ev.data.ptr = line_d0;
+	if (epoll_ctl(epfd, EPOLL_CTL_ADD, gpiod_line_event_get_fd(line_d0), &ev) < 0) {
+		perror("epoll_ctl d0");
+		goto out;
+	}
+	ev.data.ptr = line_d1;
+	if (epoll_ctl(epfd, EPOLL_CTL_ADD, gpiod_line_event_get_fd(line_d1), &ev) < 0) {
+		perror("epoll_ctl d1");
+		goto out;
+	}
 
 	while (running) {
-		struct wiegand_frame frame;
-		char buf[sizeof(struct inotify_event) + 32];
-		int poll_ret;
+		int n = epoll_wait(epfd, events, 2, 100);
+		struct timespec now;
 
-		poll_ret = poll(fds, 1, 1000);
-		if (poll_ret < 0) {
-			if (errno == EINTR)
-				continue;
-			perror("poll");
-			break;
-		} else if (poll_ret == 0) {
-			continue;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (n == 0 && nbits > 0 && diff_ns(now, last) > FRAME_TIMEOUT_NS) {
+			counter++;
+			publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
+			nbits = 0;
+			memset(bits, 0, sizeof(bits));
 		}
+		if (n <= 0)
+			continue;
 
-		if (fds[0].revents & POLLIN) {
-			/* Drain inotify */
-			read(in_fd, buf, sizeof(buf));
+		for (i = 0; i < n; ++i) {
+			struct gpiod_line_event evl;
+			struct gpiod_line *line = events[i].data.ptr;
 
-			if (read_frame(&frame) == 0)
-				publish_frame(mosq, &cfg, &frame);
+			if (gpiod_line_event_read(line, &evl) < 0)
+				continue;
+			if (diff_ns(evl.ts, last) < MIN_PULSE_NS)
+				continue;
+			last = evl.ts;
+			if (nbits < (int)sizeof(bits) - 1) {
+				bits[nbits++] = (line == line_d1) ? '1' : '0';
+				bits[nbits] = '\0';
+			}
 		}
 	}
 
 	ret = 0;
 
 out:
-	if (in_fd >= 0)
-		close(in_fd);
+	if (epfd >= 0)
+		close(epfd);
+	if (line_d0)
+		gpiod_line_release(line_d0);
+	if (line_d1)
+		gpiod_line_release(line_d1);
+	if (chip)
+		gpiod_chip_close(chip);
 	if (mosq) {
 		mosquitto_loop_stop(mosq, true);
 		mosquitto_disconnect(mosq);

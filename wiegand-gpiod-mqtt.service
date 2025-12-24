@@ -1,5 +1,5 @@
 [Unit]
-Description=Wiren Board Wiegand to MQTT bridge
+Description=Wiren Board Wiegand (libgpiod) to MQTT bridge
 After=mosquitto.service network.target
 Requires=mosquitto.service
 
