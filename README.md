@@ -20,6 +20,7 @@ MQTT controls
 - `/devices/<DEVICE_ID>/controls/Value` (raw bits as decimal)
 - `/devices/<DEVICE_ID>/controls/Facility`
 - `/devices/<DEVICE_ID>/controls/Card`
+- `/devices/<DEVICE_ID>/controls/Format` (`w26`, `w34`, `unknown`)
 - `/devices/<DEVICE_ID>/controls/LastError` (`""`, `parity_fail`, `len_mismatch`)
 
 ### Build on WB8

@@ -31,6 +31,9 @@ struct config {
 	int mqtt_port;
 	char config_path[256];
 	bool skip_meta;
+	bool swap_lines;   /* swap D0/D1 mapping */
+	bool invert_bits;  /* invert collected bits */
+	bool reverse_bits; /* reverse bit order */
 };
 
 static void handle_signal(int sig)
@@ -144,6 +147,12 @@ static int load_config(struct config *cfg, const char *path)
 			cfg->mqtt_port = atoi(val);
 		else if (strcmp(key, "SKIP_META") == 0)
 			cfg->skip_meta = (strcmp(val, "0") != 0);
+		else if (strcmp(key, "SWAP_LINES") == 0)
+			cfg->swap_lines = (strcmp(val, "0") != 0);
+		else if (strcmp(key, "INVERT_BITS") == 0)
+			cfg->invert_bits = (strcmp(val, "0") != 0);
+		else if (strcmp(key, "REVERSE_BITS") == 0)
+			cfg->reverse_bits = (strcmp(val, "0") != 0);
 	}
 
 	fclose(f);
@@ -179,6 +188,8 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	publish(mosq, topic, "value");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/LastError/meta/type", dev);
 	publish(mosq, topic, "text");
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Format/meta/type", dev);
+	publish(mosq, topic, "text");
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/ReadCounter/meta/readonly", dev);
 	publish(mosq, topic, "1");
@@ -194,6 +205,8 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	publish(mosq, topic, "1");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/LastError/meta/readonly", dev);
 	publish(mosq, topic, "1");
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Format/meta/readonly", dev);
+	publish(mosq, topic, "1");
 }
 
 static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
@@ -202,6 +215,7 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	char topic[128];
 	char payload[256];
 	const char *error = "";
+	const char *format = "unknown";
 	int facility = -1, card = -1;
 	bool parity_ok = false;
 	uint64_t raw = bits_to_u64(bits, len);
@@ -211,6 +225,7 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	if (len == 26) {
 		const char *best = bits;
 		size_t i;
+		format = "w26";
 
 		/* Try four variants: as-is, inverted, reversed, reversed+inverted */
 		for (i = 0; i < 4 && !parity_ok; i++) {
@@ -247,6 +262,36 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 		} else {
 			error = "parity_fail";
 		}
+	} else if (len == 34) {
+		const char *best = bits;
+		size_t i;
+		format = "w34";
+		/* Wiegand-34 parity: even over bits 1..16, odd over 17..32 */
+		for (i = 0; i < 4 && !parity_ok; i++) {
+			const char *cur = NULL;
+			int even = 0, odd = 0, j;
+			switch (i) {
+			case 0: cur = bits; break;
+			case 1: invert_bits(bits, candidate, len); cur = candidate; break;
+			case 2: reverse_bits(bits, candidate, len); cur = candidate; break;
+			case 3: reverse_bits(bits, tmp, len); invert_bits(tmp, candidate, len); cur = candidate; break;
+			}
+			for (j = 1; j <= 16; j++) even ^= (cur[j] == '1');
+			for (j = 17; j <= 32; j++) odd ^= (cur[j] == '1');
+			if ((cur[0] == (even ? '1' : '0')) && (cur[33] != (odd ? '1' : '0'))) {
+				parity_ok = true;
+				best = cur;
+				facility = bits_to_uint(cur, 1, 16);
+				card = bits_to_uint(cur, 17, 16);
+				raw = bits_to_u64(cur, len);
+				break;
+			}
+		}
+		if (parity_ok) {
+			bits = best;
+		} else {
+			error = "parity_fail";
+		}
 	} else {
 		error = "len_mismatch";
 	}
@@ -276,6 +321,8 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/LastError", cfg->device_id);
 	publish(mosq, topic, error);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Format", cfg->device_id);
+	publish(mosq, topic, format);
 }
 
 static inline long diff_ns(struct timespec a, struct timespec b)
@@ -367,9 +414,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "failed to get lines D0/D1\n");
 		goto out;
 	}
-	if (gpiod_line_request_falling_edge_events(line_d0, "wiegand") ||
-	    gpiod_line_request_falling_edge_events(line_d1, "wiegand")) {
-		perror("gpiod_line_request");
+	if (gpiod_line_request_falling_edge_events(line_d0, "wiegand-gpiod") ||
+	    gpiod_line_request_falling_edge_events(line_d1, "wiegand-gpiod")) {
+		perror("gpiod_line_request (are lines busy?)");
 		goto out;
 	}
 
@@ -409,6 +456,7 @@ int main(int argc, char **argv)
 		for (i = 0; i < n; ++i) {
 			struct gpiod_line_event evl;
 			struct gpiod_line *line = events[i].data.ptr;
+			bool bit_one;
 
 			if (gpiod_line_event_read(line, &evl) < 0)
 				continue;
@@ -416,7 +464,10 @@ int main(int argc, char **argv)
 				continue;
 			last = evl.ts;
 			if (nbits < (int)sizeof(bits) - 1) {
-				bits[nbits++] = (line == line_d1) ? '1' : '0';
+				bit_one = (line == (cfg.swap_lines ? line_d0 : line_d1));
+				if (cfg.swap_lines)
+					bit_one = (line == line_d0);
+				bits[nbits++] = bit_one ? '1' : '0';
 				bits[nbits] = '\0';
 			}
 		}
