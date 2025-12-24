@@ -8,7 +8,7 @@ Defaults (WB8):
 - D1: A1 IN (gpiochip0 line 233)
 
 Architecture
-- `wb-wiegand-mqtt`: userspace daemon (libgpiod + libmosquitto), слушает D0/D1, фильтр 100 мкс, тайм-аут кадра 50 мс, декодирует Wiegand‑26 (parity, Facility, Card).
+- `wb-wiegand-mqtt`: userspace daemon (libgpiod + libmosquitto), слушает D0/D1, фильтр 100 мкс, тайм-аут кадра 50 мс, декодирует Wiegand‑26 и Wiegand‑34 (паритеты, Facility, Card). Пробует 4 варианта нормализации (as-is, invert, reverse, reverse+invert) чтобы учесть перепутанные линии/полярность.
 - `wb-wiegand.conf`: конфиг (`/etc`), задаёт линии, DEVICE_ID, MQTT.
 - `wiegand-gpiod-mqtt.service`: systemd unit (ExecStart=/usr/bin/wb-wiegand-mqtt --config /etc/wb-wiegand.conf).
 - Kernel module/ DKMS остаются в дереве как legacy, но по умолчанию не собираются.
@@ -22,6 +22,11 @@ MQTT controls
 - `/devices/<DEVICE_ID>/controls/Card`
 - `/devices/<DEVICE_ID>/controls/Format` (`w26`, `w34`, `unknown`)
 - `/devices/<DEVICE_ID>/controls/LastError` (`""`, `parity_fail`, `len_mismatch`)
+
+Formats decoded
+- Wiegand‑26: bit0 even parity over 1..12, bit25 odd parity over 13..24; Facility=bits 1..8, Card=bits 9..24
+- Wiegand‑34: bit0 even parity over 1..16, bit33 odd parity over 17..32; Facility=bits 1..16, Card=bits 17..32
+Other lengths => `Format=unknown` и `LastError=len_mismatch`.
 
 ### Build on WB8
 
@@ -50,3 +55,31 @@ systemctl enable --now wiegand-gpiod-mqtt.service
 
 ### Совместимость с wb-mqtt-gpio
 wb-mqtt-gpio и этот сервис не должны одновременно удерживать одни и те же линии. Исключите A1/A2 (или нужные пины) из `/etc/wb-mqtt-gpio.conf`, либо остановите wb-mqtt-gpio на время работы сервиса.
+
+### Конфигурация `/etc/wb-wiegand.conf`
+```
+DEVICE_ID=wiegand
+D0=228              # A2 IN
+D1=233              # A1 IN
+MQTT_HOST=localhost
+MQTT_PORT=1883
+SKIP_META=0
+# При необходимости поправить полярность/порядок:
+SWAP_LINES=0
+INVERT_BITS=0
+REVERSE_BITS=0
+```
+После правок: `systemctl restart wiegand-gpiod-mqtt.service`.
+
+### Диагностика / Troubleshooting
+- Линии заняты: `journalctl` покажет `gpiod_line_request ... busy`. Проверьте `gpioinfo gpiochip0 233 228` — `consumer` должен быть пустой. Убейте старые `wb-wiegand-mqtt` (`pkill wb-wiegand-mqtt`), остановите или перенастройте wb-mqtt-gpio (убрать A1/A2), потом `systemctl restart wiegand-gpiod-mqtt`.
+- Неверный формат: `LastError=len_mismatch`, `Format=unknown` — карта не 26/34 бит или в кадре шум/обрыв. Проверьте длину `Len` и `Bits`.
+- Паритет не сходится: `LastError=parity_fail`. Попробуйте выставить в конфиге по одному: `SWAP_LINES=1`, затем `INVERT_BITS=1`, затем `REVERSE_BITS=1` (каждый раз рестарт сервиса) и смотрите, когда Facility/Card появляются.
+- MQTT недоступен: убедитесь, что mosquitto запущен (`systemctl status mosquitto`).
+- Проверка работы: `mosquitto_sub -v -t "/devices/<DEVICE_ID>/#"`; на валидной карте должны быть `Format=w26/w34`, `LastError` пустой, Facility/Card заполнены.
+
+### Зачем опции нормализации
+- SWAP_LINES — если D0/D1 физически перепутаны.
+- INVERT_BITS — если уровни трактуются наоборот (импульс как лог.1).
+- REVERSE_BITS — если порядок битов приходит задом наперёд.
+Демон также сам пробует 4 комбинации (as-is/invert/reverse/reverse+invert) чтобы найти валидный паритет; ручные опции помогают закрепить правильный вариант.
