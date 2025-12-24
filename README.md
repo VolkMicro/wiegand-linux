@@ -54,7 +54,11 @@ systemctl enable --now wiegand-gpiod-mqtt.service
 Конфиг в `/etc/wb-wiegand.conf` (меняйте D0/D1, DEVICE_ID, MQTT), затем `systemctl restart wiegand-gpiod-mqtt.service`.
 
 ### Совместимость с wb-mqtt-gpio
-wb-mqtt-gpio и этот сервис не должны одновременно удерживать одни и те же линии. Исключите A1/A2 (или нужные пины) из `/etc/wb-mqtt-gpio.conf`, либо остановите wb-mqtt-gpio на время работы сервиса.
+В linux gpiod-интерфейс требует эксклюзивного захвата линии. wb-mqtt-gpio и этот сервис не могут одновременно держать A1/A2. Варианты:
+- Удалить/не описывать A1/A2 в `/etc/wb-mqtt-gpio.conf` (и `systemctl restart wb-mqtt-gpio`), тогда линии свободны для wiegand.
+- Или остановить wb-mqtt-gpio целиком на устройстве, где нужен считыватель: `systemctl stop wb-mqtt-gpio`.
+Проверить, что линии свободны: `gpioinfo gpiochip0 233 228` — `consumer` должен быть пустым (`unused`).
+Если в логах `gpiod_line_request ... busy` — линии заняты, сервис завершится без захвата пинов.
 
 ### Конфигурация `/etc/wb-wiegand.conf`
 ```
