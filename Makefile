@@ -23,4 +23,4 @@ clean:
 install: wb-wiegand-mqtt
 	install -D -m755 wb-wiegand-mqtt $(DESTDIR)$(PREFIX)/bin/wb-wiegand-mqtt
 	install -D -m644 wb-wiegand.conf $(DESTDIR)$(SYSCONFDIR)/wb-wiegand.conf
-	install -D -m644 wb-wiegand-mqtt.service $(DESTDIR)$(SYSTEMD_UNIT_DIR)/wiegand-gpiod-mqtt.service
+	install -D -m644 wiegand-gpiod-mqtt.service $(DESTDIR)$(SYSTEMD_UNIT_DIR)/wiegand-gpiod-mqtt.service

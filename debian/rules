@@ -11,4 +11,4 @@ override_dh_auto_build:
 override_dh_auto_install:
 	install -D -m755 wb-wiegand-mqtt debian/wb-wiegand-mqtt/usr/bin/wb-wiegand-mqtt
 	install -D -m644 wb-wiegand.conf debian/wb-wiegand-mqtt/etc/wb-wiegand.conf
-	install -D -m644 wb-wiegand-mqtt.service debian/wb-wiegand-mqtt/lib/systemd/system/wiegand-gpiod-mqtt.service
+	install -D -m644 wiegand-gpiod-mqtt.service debian/wb-wiegand-mqtt/lib/systemd/system/wiegand-gpiod-mqtt.service

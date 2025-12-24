@@ -1,3 +1,10 @@
+wb-wiegand (0.3.0-1) unstable; urgency=medium
+
+  * Switch to pure userspace (libgpiod + mosquitto), remove kernel module/DKMS.
+  * Systemd unit: wiegand-gpiod-mqtt.service; config in /etc/wb-wiegand.conf.
+
+ -- Wiegand Maintainer <support@example.com>  Fri, 24 Dec 2025 21:30:00 +0000
+
 wb-wiegand (0.2.0-1) unstable; urgency=medium
 
   * Initial WB8 port of Wiegand GPIO driver and MQTT bridge.
