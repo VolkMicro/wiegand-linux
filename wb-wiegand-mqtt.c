@@ -18,8 +18,8 @@
 #define DEFAULT_MQTT_PORT 1883
 #define DEFAULT_CHIP "gpiochip0"
 
-#define MIN_PULSE_NS 100000          /* 100 usec debounce */
-#define FRAME_TIMEOUT_NS (50ULL * 1000 * 1000) /* 50 msec */
+#define MIN_PULSE_NS 100000LL          /* 100 usec debounce */
+#define FRAME_TIMEOUT_NS (50LL * 1000 * 1000) /* 50 msec */
 
 static volatile bool running = true;
 
@@ -239,6 +239,7 @@ int main(int argc, char **argv)
 	int nbits = 0;
 	uint64_t counter = 0;
 	struct timespec last = {0};
+	char tmp_bits[256];
 
 	for (i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "--d0") == 0 && i + 1 < argc) {
@@ -323,8 +324,19 @@ int main(int argc, char **argv)
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (n == 0 && nbits > 0 && diff_ns(now, last) > FRAME_TIMEOUT_NS) {
-			counter++;
-			publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
+			if (nbits >= 8) {
+				/* If parity fails, try flipped bit mapping (D0 as '1') */
+				if (nbits == 26 && !check_parity26(bits)) {
+					size_t j;
+					for (j = 0; j < (size_t)nbits; j++)
+						tmp_bits[j] = (bits[j] == '1') ? '0' : '1';
+					tmp_bits[nbits] = '\0';
+					if (check_parity26(tmp_bits))
+						memcpy(bits, tmp_bits, nbits + 1);
+				}
+				counter++;
+				publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
+			}
 			nbits = 0;
 			memset(bits, 0, sizeof(bits));
 		}
