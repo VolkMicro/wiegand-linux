@@ -1,28 +1,53 @@
 wiegand-linux
 =============
 
-Linux driver for reading wiegand data from GPIO. Tested on Wiren Board 4 (Freescale i.mx233) and Wiren Board 6 (NXP i.MX 6ULL)
+Linux driver for reading Wiegand data from GPIO. Updated for Wiren Board 8 (kernel 6.8, aarch64) with a wb-mqtt bridge.
 
+Defaults (WB8):
+- D0: A2 IN (gpiochip0 line 228)
+- D1: A1 IN (gpiochip0 line 233)
 
-- Ensure your arm-linux cross compiler is in your path.
-- Ensure your kernel is at the same level as this directory.
+Components
+- `wiegand-gpio.ko`: kernel module capturing bits on GPIO IRQs, exposes `/sys/kernel/wiegand/read`.
+- `wb-wiegand-mqtt`: user-space daemon that loads the module, watches sysfs, decodes Wiegand-26 (facility + card), publishes MQTT controls.
+- `wb-wiegand-mqtt.service`: systemd unit.
+- `dkms.conf`: DKMS packaging for the module.
 
-Repository contains built kernel module for armhf (Wiren Board 6, Kernel 4.9.22-wb6 +wb20200610110035)
+### Build on device (WB8)
 
-### Installation
+```
+apt install build-essential dkms pkg-config libmosquitto-dev
+make            # builds module + wb-wiegand-mqtt
+```
 
-- Check kernel version with `apt show linux-image-wb6 | grep Version`
-- Clone or download this repository
-- Change GPIO's ids in file `wiegand-monitor`, if you need
-- Exec `wiegand-monitor` script
+Load module manually:
+```
+modprobe wiegand-gpio D0=228 D1=233
+```
 
-MQTT virtual device will be available at `/devices/wiegand/controls/Reader`
+Run bridge manually:
+```
+./wb-wiegand-mqtt --config ./wb-wiegand.conf
+```
 
+### Install with DKMS + service (manual steps)
 
-### Building from source
+```
+dkms add .
+dkms install -m wiegand-gpio -v 0.2.0
+install -m644 wb-wiegand.conf /etc/wb-wiegand.conf
+install -m755 wb-wiegand-mqtt /usr/bin/wb-wiegand-mqtt
+install -m644 wb-wiegand-mqtt.service /lib/systemd/system/wb-wiegand-mqtt.service
+systemctl daemon-reload
+systemctl enable --now wb-wiegand-mqtt
+```
 
-To build this module from source for Wiren Board kernel we need [WB Dev Environment](https://github.com/wirenboard/wirenboard)
+### MQTT controls
+- `/devices/wiegand/controls/ReadCounter`
+- `/devices/wiegand/controls/Bits` (raw bit string)
+- `/devices/wiegand/controls/Len`
+- `/devices/wiegand/controls/FacilityCode`
+- `/devices/wiegand/controls/CardNumber`
+- `/devices/wiegand/controls/LastError`
 
-- Clone repo
-- Run `WBDEV_TARGET=wb6 wbdev chuser` in project directory (wb6 for Wiren Board 6)
-- `make`
+Only Wiegand-26 frames are decoded; other lengths are reported with `LastError=len_mismatch`.

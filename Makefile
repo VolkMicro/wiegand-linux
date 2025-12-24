@@ -1,11 +1,24 @@
-KERNEL_DIR=/usr/src/linux-headers-4.9.22-wb2
-
-obj-m := wiegand-gpio.o
+KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
-all: wiegand-gpio.c
-	$(MAKE) ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -C $(KERNEL_DIR) M=$(PWD) modules
+obj-m := wiegand-gpio.o
+
+CC ?= gcc
+MOSQ_CFLAGS := $(shell pkg-config --cflags libmosquitto 2>/dev/null)
+MOSQ_LIBS := $(shell pkg-config --libs libmosquitto 2>/dev/null)
+MOSQ_LIBS ?= -lmosquitto
+CFLAGS_USER ?= -O2 -Wall -Wextra
+
+.PHONY: all module user clean
+
+all: module wb-wiegand-mqtt
+
+module: wiegand-gpio.c
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) modules
+
+wb-wiegand-mqtt: wb-wiegand-mqtt.c
+	$(CC) $(CFLAGS_USER) $(MOSQ_CFLAGS) -o $@ $< $(MOSQ_LIBS)
 
 clean:
-	make -C $(KERNEL_DIR) SUBDIRS=$(PWD) clean
-
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean
+	$(RM) wb-wiegand-mqtt

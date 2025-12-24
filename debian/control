@@ -1,0 +1,19 @@
+Source: wb-wiegand
+Section: misc
+Priority: optional
+Maintainer: Wiegand Maintainer <support@example.com>
+Build-Depends: debhelper-compat (= 13), dkms, pkg-config, libmosquitto-dev
+Standards-Version: 4.6.0
+Homepage: https://github.com/
+
+Package: wiegand-gpio-dkms
+Architecture: all
+Depends: dkms (>= 2.1.0.0), ${misc:Depends}
+Description: DKMS module for Wiegand GPIO driver
+ Wiegand GPIO driver for Wiren Board controllers. Built via DKMS on install.
+
+Package: wb-wiegand-mqtt
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, mosquitto
+Description: MQTT bridge for Wiegand reader
+ Loads the Wiegand kernel module and publishes Wiegand-26 reads to MQTT.

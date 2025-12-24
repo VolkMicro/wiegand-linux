@@ -1,0 +1,5 @@
+wb-wiegand (0.2.0-1) unstable; urgency=medium
+
+  * Initial WB8 port of Wiegand GPIO driver and MQTT bridge.
+
+ -- Wiegand Maintainer <support@example.com>  Fri, 24 Dec 2025 16:25:00 +0000
