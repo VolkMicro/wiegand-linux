@@ -79,6 +79,19 @@ static bool check_parity26(const char *bits)
 	       (bits[25] != (odd ? '1' : '0')); /* last is odd parity */
 }
 
+static uint64_t bits_to_u64(const char *bits, size_t len)
+{
+	size_t i;
+	uint64_t val = 0;
+
+	for (i = 0; i < len && i < 64; ++i) {
+		val <<= 1;
+		if (bits[i] == '1')
+			val |= 1ULL;
+	}
+	return val;
+}
+
 static int load_config(struct config *cfg, const char *path)
 {
 	FILE *f = fopen(path, "r");
@@ -140,6 +153,8 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	publish(mosq, topic, "text");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Len/meta/type", dev);
 	publish(mosq, topic, "value");
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Value/meta/type", dev);
+	publish(mosq, topic, "value");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Facility/meta/type", dev);
 	publish(mosq, topic, "value");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Card/meta/type", dev);
@@ -152,6 +167,8 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Bits/meta/readonly", dev);
 	publish(mosq, topic, "1");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Len/meta/readonly", dev);
+	publish(mosq, topic, "1");
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Value/meta/readonly", dev);
 	publish(mosq, topic, "1");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Facility/meta/readonly", dev);
 	publish(mosq, topic, "1");
@@ -169,6 +186,7 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	const char *error = "";
 	int facility = -1, card = -1;
 	bool parity_ok = false;
+	uint64_t raw = bits_to_u64(bits, len);
 
 	if (len == 26) {
 		parity_ok = check_parity26(bits);
@@ -191,6 +209,10 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Len", cfg->device_id);
 	snprintf(payload, sizeof(payload), "%zu", len);
+	publish(mosq, topic, payload);
+
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/Value", cfg->device_id);
+	snprintf(payload, sizeof(payload), "%llu", (unsigned long long)raw);
 	publish(mosq, topic, payload);
 
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Facility", cfg->device_id);

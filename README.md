@@ -17,6 +17,7 @@ MQTT controls
 - `/devices/<DEVICE_ID>/controls/ReadCounter`
 - `/devices/<DEVICE_ID>/controls/Bits` (raw bit string)
 - `/devices/<DEVICE_ID>/controls/Len`
+- `/devices/<DEVICE_ID>/controls/Value` (raw bits as decimal)
 - `/devices/<DEVICE_ID>/controls/Facility`
 - `/devices/<DEVICE_ID>/controls/Card`
 - `/devices/<DEVICE_ID>/controls/LastError` (`""`, `parity_fail`, `len_mismatch`)
