@@ -92,6 +92,24 @@ static uint64_t bits_to_u64(const char *bits, size_t len)
 	return val;
 }
 
+static void invert_bits(const char *in, char *out, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		out[i] = (in[i] == '1') ? '0' : '1';
+	out[len] = '\0';
+}
+
+static void reverse_bits(const char *in, char *out, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		out[i] = in[len - 1 - i];
+	out[len] = '\0';
+}
+
 static int load_config(struct config *cfg, const char *path)
 {
 	FILE *f = fopen(path, "r");
@@ -187,12 +205,45 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	int facility = -1, card = -1;
 	bool parity_ok = false;
 	uint64_t raw = bits_to_u64(bits, len);
+	char candidate[256];
+	char tmp[256];
 
 	if (len == 26) {
-		parity_ok = check_parity26(bits);
+		const char *best = bits;
+		size_t i;
+
+		/* Try four variants: as-is, inverted, reversed, reversed+inverted */
+		for (i = 0; i < 4 && !parity_ok; i++) {
+			const char *cur = NULL;
+			switch (i) {
+			case 0:
+				cur = bits;
+				break;
+			case 1:
+				invert_bits(bits, candidate, len);
+				cur = candidate;
+				break;
+			case 2:
+				reverse_bits(bits, candidate, len);
+				cur = candidate;
+				break;
+			case 3:
+				reverse_bits(bits, tmp, len);
+				invert_bits(tmp, candidate, len);
+				cur = candidate;
+				break;
+			}
+			if (check_parity26(cur)) {
+				parity_ok = true;
+				best = cur;
+				facility = bits_to_uint(cur, 1, 8);
+				card = bits_to_uint(cur, 9, 16);
+				raw = bits_to_u64(cur, len);
+				break;
+			}
+		}
 		if (parity_ok) {
-			facility = bits_to_uint(bits, 1, 8);
-			card = bits_to_uint(bits, 9, 16);
+			bits = best; /* publish normalized bits */
 		} else {
 			error = "parity_fail";
 		}
@@ -261,7 +312,6 @@ int main(int argc, char **argv)
 	int nbits = 0;
 	uint64_t counter = 0;
 	struct timespec last = {0};
-	char tmp_bits[256];
 
 	for (i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "--d0") == 0 && i + 1 < argc) {
@@ -347,15 +397,6 @@ int main(int argc, char **argv)
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (n == 0 && nbits > 0 && diff_ns(now, last) > FRAME_TIMEOUT_NS) {
 			if (nbits >= 8) {
-				/* If parity fails, try flipped bit mapping (D0 as '1') */
-				if (nbits == 26 && !check_parity26(bits)) {
-					size_t j;
-					for (j = 0; j < (size_t)nbits; j++)
-						tmp_bits[j] = (bits[j] == '1') ? '0' : '1';
-					tmp_bits[nbits] = '\0';
-					if (check_parity26(tmp_bits))
-						memcpy(bits, tmp_bits, nbits + 1);
-				}
 				counter++;
 				publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
 			}
