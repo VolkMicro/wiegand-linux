@@ -18,7 +18,7 @@
 #define DEFAULT_MQTT_PORT 1883
 #define DEFAULT_CHIP "gpiochip0"
 
-#define MIN_PULSE_NS 100000LL          /* 100 usec debounce */
+#define MIN_PULSE_NS 250000LL          /* 250 usec debounce (filters bounce) */
 #define FRAME_TIMEOUT_NS (50LL * 1000 * 1000) /* 50 msec */
 
 static volatile bool running = true;
@@ -223,6 +223,7 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	uint64_t raw;
 	char candidate[256];
 	char tmp[256];
+	char salvage[256];
 	const char *input = bits;
 
 	/* Apply user-configured transforms (reverse/invert) before autodetect */
@@ -240,6 +241,22 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 		}
 		bits = input;
 	}
+
+	/* Try to salvage a noisy W26 frame that has 1-2 extra/short bits */
+	if (len != 26 && len != 34 && len >= 24 && len <= 32) {
+		size_t start;
+
+		for (start = 0; start + 26 <= len; start++) {
+			memcpy(salvage, bits + start, 26);
+			salvage[26] = '\0';
+			if (check_parity26(salvage)) {
+				bits = salvage;
+				len = 26;
+				break;
+			}
+		}
+	}
+
 	raw = bits_to_u64(bits, len);
 
 	if (len == 26) {
