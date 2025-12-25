@@ -218,9 +218,29 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	const char *format = "unknown";
 	int facility = -1, card = -1;
 	bool parity_ok = false;
-	uint64_t raw = bits_to_u64(bits, len);
+	char base_bits[256];
+	char cfg_tmp[256];
+	uint64_t raw;
 	char candidate[256];
 	char tmp[256];
+	const char *input = bits;
+
+	/* Apply user-configured transforms (reverse/invert) before autodetect */
+	if (len < sizeof(base_bits)) {
+		memcpy(base_bits, bits, len);
+		base_bits[len] = '\0';
+		input = base_bits;
+		if (cfg->reverse_bits) {
+			reverse_bits(input, cfg_tmp, len);
+			input = cfg_tmp;
+		}
+		if (cfg->invert_bits) {
+			invert_bits(input, base_bits, len);
+			input = base_bits;
+		}
+		bits = input;
+	}
+	raw = bits_to_u64(bits, len);
 
 	if (len == 26) {
 		const char *best = bits;
@@ -349,6 +369,9 @@ int main(int argc, char **argv)
 		.mqtt_port = DEFAULT_MQTT_PORT,
 		.config_path = "/etc/wb-wiegand.conf",
 		.skip_meta = false,
+		.swap_lines = false,
+		.invert_bits = false,
+		.reverse_bits = false,
 	};
 	int i, ret = 1;
 	struct gpiod_chip *chip = NULL;
@@ -358,7 +381,7 @@ int main(int argc, char **argv)
 	char bits[256] = {0};
 	int nbits = 0;
 	uint64_t counter = 0;
-	struct timespec last = {0};
+	struct timespec last_event = {0};
 
 	for (i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "--d0") == 0 && i + 1 < argc) {
@@ -442,13 +465,14 @@ int main(int argc, char **argv)
 		struct timespec now;
 
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (n == 0 && nbits > 0 && diff_ns(now, last) > FRAME_TIMEOUT_NS) {
+		if (n == 0 && nbits > 0 && last_event.tv_sec != 0 &&
+		    diff_ns(now, last_event) > FRAME_TIMEOUT_NS) {
 			if (nbits >= 8) {
 				counter++;
 				publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
 			}
 			nbits = 0;
-			memset(bits, 0, sizeof(bits));
+			bits[0] = '\0';
 		}
 		if (n <= 0)
 			continue;
@@ -456,17 +480,33 @@ int main(int argc, char **argv)
 		for (i = 0; i < n; ++i) {
 			struct gpiod_line_event evl;
 			struct gpiod_line *line = events[i].data.ptr;
+			struct timespec ev_ts;
 			bool bit_one;
 
 			if (gpiod_line_event_read(line, &evl) < 0)
 				continue;
-			if (diff_ns(evl.ts, last) < MIN_PULSE_NS)
+			if (evl.event_type != GPIOD_LINE_EVENT_FALLING_EDGE)
 				continue;
-			last = evl.ts;
+
+			clock_gettime(CLOCK_MONOTONIC, &ev_ts);
+
+			/* If gap exceeded, close out previous frame before taking this bit */
+			if (last_event.tv_sec != 0 &&
+			    diff_ns(ev_ts, last_event) > FRAME_TIMEOUT_NS) {
+				if (nbits >= 8) {
+					counter++;
+					publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
+				}
+				nbits = 0;
+				bits[0] = '\0';
+			}
+
+			if (last_event.tv_sec != 0 &&
+			    diff_ns(ev_ts, last_event) < MIN_PULSE_NS)
+				continue;
+			last_event = ev_ts;
 			if (nbits < (int)sizeof(bits) - 1) {
 				bit_one = (line == (cfg.swap_lines ? line_d0 : line_d1));
-				if (cfg.swap_lines)
-					bit_one = (line == line_d0);
 				bits[nbits++] = bit_one ? '1' : '0';
 				bits[nbits] = '\0';
 			}
