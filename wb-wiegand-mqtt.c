@@ -18,7 +18,7 @@
 #define DEFAULT_MQTT_PORT 1883
 #define DEFAULT_CHIP "gpiochip0"
 
-#define MIN_PULSE_NS 250000LL          /* 250 usec debounce (filters bounce) */
+#define MIN_PULSE_NS 400000LL          /* 400 usec debounce (filters bounce) */
 #define FRAME_TIMEOUT_NS (50LL * 1000 * 1000) /* 50 msec */
 
 static volatile bool running = true;
@@ -242,18 +242,25 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 		bits = input;
 	}
 
-	/* Try to salvage a noisy W26 frame that has 1-2 extra/short bits */
+	/*
+	 * Try to salvage a noisy W26 frame that has 1-2 extra/short bits.
+	 * Only accept if exactly one window passes parity; otherwise keep len_mismatch.
+	 */
 	if (len != 26 && len != 34 && len >= 24 && len <= 32) {
 		size_t start;
+		int found = 0;
 
 		for (start = 0; start + 26 <= len; start++) {
 			memcpy(salvage, bits + start, 26);
 			salvage[26] = '\0';
 			if (check_parity26(salvage)) {
-				bits = salvage;
-				len = 26;
-				break;
+				found++;
+				input = salvage;
 			}
+		}
+		if (found == 1) {
+			bits = input;
+			len = 26;
 		}
 	}
 
@@ -497,15 +504,13 @@ int main(int argc, char **argv)
 		for (i = 0; i < n; ++i) {
 			struct gpiod_line_event evl;
 			struct gpiod_line *line = events[i].data.ptr;
-			struct timespec ev_ts;
+			struct timespec ev_ts = evl.ts;
 			bool bit_one;
 
 			if (gpiod_line_event_read(line, &evl) < 0)
 				continue;
 			if (evl.event_type != GPIOD_LINE_EVENT_FALLING_EDGE)
 				continue;
-
-			clock_gettime(CLOCK_MONOTONIC, &ev_ts);
 
 			/* If gap exceeded, close out previous frame before taking this bit */
 			if (last_event.tv_sec != 0 &&
