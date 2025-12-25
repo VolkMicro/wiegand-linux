@@ -1,4 +1,4 @@
-wiegand-linux
+ wiegand-linux
 ==============
 
 Пользовательский Wiegand-считыватель для Wiren Board 8 (kernel 6.8, aarch64) на libgpiod + MQTT. Ядровой модуль не используется: две линии GPIO слушаются по IRQ, кадры Wiegand‑26 и Wiegand‑34 декодируются в Facility/Card, результаты публикуются в MQTT.
