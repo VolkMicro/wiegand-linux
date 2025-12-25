@@ -207,10 +207,20 @@ static void publish_meta(struct mosquitto *mosq, const char *dev)
 	publish(mosq, topic, "1");
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Format/meta/readonly", dev);
 	publish(mosq, topic, "1");
+
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/DiagDroppedDebounce/meta/type", dev);
+	publish(mosq, topic, "value");
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/DiagDroppedDebounce/meta/readonly", dev);
+	publish(mosq, topic, "1");
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/DiagLastGapUs/meta/type", dev);
+	publish(mosq, topic, "value");
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/DiagLastGapUs/meta/readonly", dev);
+	publish(mosq, topic, "1");
 }
 
 static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
-			  const char *bits, size_t len, uint64_t counter)
+			  const char *bits, size_t len, uint64_t counter,
+			  uint64_t dropped_debounce, uint64_t last_gap_us)
 {
 	char topic[128];
 	char payload[256];
@@ -367,6 +377,13 @@ static void publish_frame(struct mosquitto *mosq, const struct config *cfg,
 	publish(mosq, topic, error);
 	snprintf(topic, sizeof(topic), "/devices/%s/controls/Format", cfg->device_id);
 	publish(mosq, topic, format);
+
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/DiagDroppedDebounce", cfg->device_id);
+	snprintf(payload, sizeof(payload), "%llu", (unsigned long long)dropped_debounce);
+	publish(mosq, topic, payload);
+	snprintf(topic, sizeof(topic), "/devices/%s/controls/DiagLastGapUs", cfg->device_id);
+	snprintf(payload, sizeof(payload), "%llu", (unsigned long long)last_gap_us);
+	publish(mosq, topic, payload);
 }
 
 static inline long diff_ns(struct timespec a, struct timespec b)
@@ -406,6 +423,8 @@ int main(int argc, char **argv)
 	int nbits = 0;
 	uint64_t counter = 0;
 	struct timespec last_event = {0};
+	uint64_t dropped_debounce = 0;
+	uint64_t last_gap_us = 0;
 
 	for (i = 1; i < argc; ++i) {
 		if (strcmp(argv[i], "--d0") == 0 && i + 1 < argc) {
@@ -493,10 +512,12 @@ int main(int argc, char **argv)
 		    diff_ns(now, last_event) > FRAME_TIMEOUT_NS) {
 			if (nbits >= 8) {
 				counter++;
-				publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
+				publish_frame(mosq, &cfg, bits, (size_t)nbits, counter,
+					      dropped_debounce, last_gap_us);
 			}
 			nbits = 0;
 			bits[0] = '\0';
+			dropped_debounce = 0;
 		}
 		if (n <= 0)
 			continue;
@@ -504,28 +525,34 @@ int main(int argc, char **argv)
 		for (i = 0; i < n; ++i) {
 			struct gpiod_line_event evl;
 			struct gpiod_line *line = events[i].data.ptr;
-			struct timespec ev_ts = evl.ts;
+			struct timespec ev_ts;
 			bool bit_one;
 
 			if (gpiod_line_event_read(line, &evl) < 0)
 				continue;
 			if (evl.event_type != GPIOD_LINE_EVENT_FALLING_EDGE)
 				continue;
+			ev_ts = evl.ts;
 
-			/* If gap exceeded, close out previous frame before taking this bit */
-			if (last_event.tv_sec != 0 &&
-			    diff_ns(ev_ts, last_event) > FRAME_TIMEOUT_NS) {
-				if (nbits >= 8) {
-					counter++;
-					publish_frame(mosq, &cfg, bits, (size_t)nbits, counter);
+			if (last_event.tv_sec != 0) {
+				uint64_t gap_ns = (uint64_t)diff_ns(ev_ts, last_event);
+				last_gap_us = gap_ns / 1000ULL;
+				if (gap_ns < MIN_PULSE_NS) {
+					dropped_debounce++;
+					continue;
 				}
-				nbits = 0;
-				bits[0] = '\0';
+				if (gap_ns > FRAME_TIMEOUT_NS && nbits > 0) {
+					if (nbits >= 8) {
+						counter++;
+						publish_frame(mosq, &cfg, bits, (size_t)nbits, counter,
+							      dropped_debounce, last_gap_us);
+					}
+					nbits = 0;
+					bits[0] = '\0';
+					dropped_debounce = 0;
+				}
 			}
 
-			if (last_event.tv_sec != 0 &&
-			    diff_ns(ev_ts, last_event) < MIN_PULSE_NS)
-				continue;
 			last_event = ev_ts;
 			if (nbits < (int)sizeof(bits) - 1) {
 				bit_one = (line == (cfg.swap_lines ? line_d0 : line_d1));
